@@ -3,13 +3,17 @@
 
 MODULE_LICENSE("Dual BSD/GPL");
 
-static int hello_init(void)
+/* __init will discard the initialization code once initialization is done
+   freeing up kernel memory
+*/
+static int __init hello_init(void)
 {
 	printk(KERN_ALERT "Hello World!\n");
 	return 0;
 }
 
-static void hello_exit(void)
+/* __exit marks the code for being for module unload only */
+static void __exit hello_exit(void)
 {
 	printk(KERN_ALERT "Goodbye Cruel world!\n");
 }
