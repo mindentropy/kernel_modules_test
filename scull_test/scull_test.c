@@ -6,6 +6,7 @@
 #include <linux/errno.h>
 #include <linux/cdev.h>
 #include <linux/slab.h> /* kmalloc */
+#include <linux/mutex.h>
 
 #include "scull_test.h"
 
@@ -84,10 +85,33 @@ struct file_operations scull_fops = {
 
 static void scull_cleanup_module(void)
 {
+	int i;
 	dev_t dev = MKDEV(scull_major, scull_minor);
+
+	if(scull_devices) {
+		for(i = 0; i<scull_nr_devices; i++) {
+			cdev_del(&(scull_devices[i].cdev));
+		}
+		kfree(scull_devices);
+	}
+
 	unregister_chrdev_region(dev, scull_nr_devices);
 
 	printk(KERN_DEBUG "%s\n", __func__);
+}
+
+static void scull_setup_cdev(struct scull_dev *scull_dev, int index)
+{
+	int err;
+	dev_t devno = MKDEV(scull_major, scull_minor + index);
+
+	cdev_init(&(scull_dev->cdev), &scull_fops);
+	scull_dev->cdev.owner = THIS_MODULE;
+	err = cdev_add(&(scull_dev->cdev), devno, 1);
+
+	if(err) {
+		printk(KERN_NOTICE "Error %d adding scull %d\n", err, index);
+	}
 }
 
 static int __init scull_init_module(void)
@@ -126,9 +150,11 @@ static int __init scull_init_module(void)
 
 	for(i = 0; i<scull_nr_devices; i++)
 	{
-/*		scull_devices[i].sem = */
-/*		scull_devices[i].cdev = scull_cdev_init(*/
+		mutex_init(&(scull_devices[i].mutex));
+		scull_setup_cdev(&(scull_devices[i]), i);
 	}
+
+	return 0;
 
 fail:
 	scull_cleanup_module();

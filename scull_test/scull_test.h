@@ -16,7 +16,7 @@ extern int scull_quantum;
 extern int scull_qset;
 
 struct scull_dev {
-	struct semaphore sem;
+	struct mutex mutex;
 	struct cdev cdev;
 };
 
