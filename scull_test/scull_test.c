@@ -6,7 +6,8 @@
 #include <linux/errno.h>
 #include <linux/cdev.h>
 #include <linux/slab.h> /* kmalloc */
-#include <linux/mutex.h>
+#include <linux/semaphore.h>
+#include <linux/uaccess.h>
 
 #include "scull_test.h"
 
@@ -27,6 +28,24 @@ module_param(scull_qset, int, S_IRUGO);*/
 
 int scull_open(struct inode *inode, struct file *filp)
 {
+	struct scull_dev *dev;
+
+	printk(KERN_DEBUG "Minor number, device to be opened: %d\n", MINOR(inode->i_rdev));
+	dev = container_of(inode->i_cdev, struct scull_dev, cdev);
+	filp->private_data = dev; /* filp -> Pointer to a open file, which will be passed around */
+
+	if( (filp->f_flags & O_ACCMODE)  == O_WRONLY ) {
+		if ( down_interruptible(&dev->sem) ) {
+			return -ERESTARTSYS; /*
+									Restart the system call transparently by the kernel itself
+									if the process is interrupted by the signal
+								*/
+		}
+		/* Trim the storage */
+
+		up(&dev->sem);
+	}
+
 	return 0;
 }
 
@@ -52,7 +71,35 @@ ssize_t scull_write(
 			loff_t *f_pos
 			)
 {
-	return 0;
+	ssize_t retval = -ENOMEM;
+	struct scull_dev *scull_dev = filp->private_data;
+	int i = 0;
+
+	char tmpbuff[2];
+
+	if(down_interruptible(&(scull_dev->sem))) {
+		return -ERESTARTSYS;
+	}
+
+
+	if (count > 2) {
+		count = 2;
+	}
+	if(copy_from_user(tmpbuff, buff, count)) {
+		retval = -EFAULT;
+		goto out;
+	}
+
+	for(i = 0; i<count; i++)
+	{
+		printk(KERN_DEBUG "%c", tmpbuff[i]);
+	}
+
+	retval = count;
+
+	out:
+		up(&(scull_dev->sem));
+		return retval;
 }
 
 loff_t scull_llseek(
@@ -150,7 +197,7 @@ static int __init scull_init_module(void)
 
 	for(i = 0; i<scull_nr_devices; i++)
 	{
-		mutex_init(&(scull_devices[i].mutex));
+		sema_init(&(scull_devices[i].sem), 1);
 		scull_setup_cdev(&(scull_devices[i]), i);
 	}
 
@@ -160,7 +207,6 @@ fail:
 	scull_cleanup_module();
 	return result;
 }
-
 
 module_init(scull_init_module);
 module_exit(scull_cleanup_module);
