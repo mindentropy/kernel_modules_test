@@ -17,14 +17,42 @@ MODULE_AUTHOR("mindentropy");
 int scull_major = SCULL_MAJOR;
 int scull_minor = 0;
 int scull_nr_devices = SCULL_NR_DEVICES;
+int scull_quantum = SCULL_QUANTUM;
+int scull_qset = SCULL_QSET;
 
 struct scull_dev *scull_devices = NULL;
 
 module_param(scull_major, int, S_IRUGO);
 module_param(scull_minor, int, S_IRUGO);
 module_param(scull_nr_devices, int, S_IRUGO);
-/*module_param(scull_quantum, int, S_IRUGO);
-module_param(scull_qset, int, S_IRUGO);*/
+module_param(scull_quantum, int, S_IRUGO);
+module_param(scull_qset, int, S_IRUGO);
+
+int scull_trim(struct scull_dev *dev)
+{
+	struct scull_qset *next, *dptr;
+	int qset = dev->qset;
+	int i;
+
+	for(dptr = dev->data; dptr; dptr = next) {
+		if(dptr->data) {
+			for(i = 0; i<qset; i++) {
+				kfree(dptr->data[i]);
+			}
+			kfree(dptr->data);
+			dptr->data = NULL;
+		}
+		next = dptr->next; /* Go to the next node */
+		kfree(dptr); /* Delete the node */
+	}
+
+	dev->size = 0;
+	dev->quantum = scull_quantum;
+	dev->qset = scull_qset;
+	dev->data = NULL;
+
+	return 0;
+}
 
 int scull_open(struct inode *inode, struct file *filp)
 {
@@ -34,15 +62,15 @@ int scull_open(struct inode *inode, struct file *filp)
 	dev = container_of(inode->i_cdev, struct scull_dev, cdev);
 	filp->private_data = dev; /* filp -> Pointer to a open file, which will be passed around */
 
-	if( (filp->f_flags & O_ACCMODE)  == O_WRONLY ) {
-		if ( down_interruptible(&dev->sem) ) {
+	if((filp->f_flags & O_ACCMODE)  == O_WRONLY ) {
+		if (down_interruptible(&dev->sem)) {
 			return -ERESTARTSYS; /*
 									Restart the system call transparently by the kernel itself
 									if the process is interrupted by the signal
 								*/
 		}
 		/* Trim the storage */
-
+		scull_trim(dev);
 		up(&dev->sem);
 	}
 
@@ -197,6 +225,8 @@ static int __init scull_init_module(void)
 
 	for(i = 0; i<scull_nr_devices; i++)
 	{
+		scull_devices[i].quantum = scull_quantum;
+		scull_devices[i].qset = scull_qset;
 		sema_init(&(scull_devices[i].sem), 1);
 		scull_setup_cdev(&(scull_devices[i]), i);
 	}
