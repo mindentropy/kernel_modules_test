@@ -8,6 +8,7 @@
 #include <linux/slab.h> /* kmalloc */
 #include <linux/semaphore.h>
 #include <linux/uaccess.h>
+#include <linux/device.h>
 
 #include "scull_test.h"
 
@@ -21,6 +22,8 @@ int scull_quantum = SCULL_QUANTUM;
 int scull_qset = SCULL_QSET;
 
 struct scull_dev *scull_devices = NULL;
+static struct class *scull_class = NULL;
+static struct device *scull_devs = NULL;
 
 module_param(scull_major, int, S_IRUGO);
 module_param(scull_minor, int, S_IRUGO);
@@ -400,6 +403,10 @@ static void scull_cleanup_module(void)
 	int i;
 	dev_t dev = MKDEV(scull_major, scull_minor);
 
+	device_destroy(scull_class, dev);
+	class_unregister(scull_class);
+	class_destroy(scull_class);
+
 	if(scull_devices) {
 		for(i = 0; i<scull_nr_devices; i++) {
 			cdev_del(&(scull_devices[i].cdev));
@@ -447,6 +454,14 @@ static int __init scull_init_module(void)
 		return result;
 	}
 
+	/* Create a scull class */
+	scull_class = class_create(THIS_MODULE, CLASS_NAME);
+
+	if(IS_ERR(scull_class)) {
+		/*TODO: Pending error handling */
+		printk(KERN_DEBUG "Could not allocate class");
+	}
+
 	scull_devices = kmalloc(
 						sizeof(struct scull_dev) * scull_nr_devices,
 						GFP_KERNEL
@@ -466,6 +481,13 @@ static int __init scull_init_module(void)
 		scull_devices[i].qset = scull_qset;
 		sema_init(&(scull_devices[i].sem), 1);
 		scull_setup_cdev(&(scull_devices[i]), i);
+	}
+
+	/* Register device driver */
+	scull_devs = device_create(scull_class, NULL, dev, NULL, DEVICE_NAME);
+
+	if(IS_ERR(scull_devs)) {
+		printk(KERN_DEBUG "Could not create scull devices\n");
 	}
 
 	return 0;

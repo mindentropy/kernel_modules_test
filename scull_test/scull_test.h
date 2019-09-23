@@ -39,6 +39,9 @@
 
 #define SCULL_IOC_MAXNR 	14
 
+#define CLASS_NAME 		"scull"
+#define DEVICE_NAME 	"scull"
+
 extern int scull_major;
 extern int scull_minor;
 extern int scull_nr_devices;
