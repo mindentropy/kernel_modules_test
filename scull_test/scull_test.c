@@ -54,6 +54,38 @@ int scull_trim(struct scull_dev *dev)
 	return 0;
 }
 
+struct scull_qset * scull_follow(
+							struct scull_dev *dev,
+							int n
+							)
+{
+	struct scull_qset *qset = dev->data;
+
+	if(!qset) { /* If the node is empty. Allocate and return */
+		qset = dev->data = kmalloc(sizeof(struct scull_qset), GFP_KERNEL);
+		if(qset == NULL)
+			return NULL;
+
+		memset(qset, 0, sizeof(struct scull_qset));
+	}
+
+	/* Follow the list */
+	while(n--) {
+		if(qset->next == NULL) {
+			/* Allocate as you go */
+			qset->next = kmalloc(sizeof(struct scull_qset), GFP_KERNEL);
+			if(qset->next == NULL) {
+				return NULL;
+			}
+			memset(qset, 0, sizeof(struct scull_qset));
+		}
+		qset = qset->next;
+	}
+
+	return qset;
+}
+
+
 int scull_open(struct inode *inode, struct file *filp)
 {
 	struct scull_dev *dev;
@@ -89,7 +121,59 @@ ssize_t scull_read(
 				loff_t *f_pos
 			)
 {
-	return 0;
+	struct scull_dev *scull_dev = filp->private_data;
+	int quantum = scull_dev->quantum;
+	int qset = scull_dev->qset;
+	int itemsize = quantum * qset;
+	int retval = 0;
+	int node = 0, itemloc = 0, s_pos, q_pos;
+	struct scull_qset *dptr;
+
+	if(down_interruptible(&scull_dev->sem)) {
+		return -ERESTARTSYS;
+	}
+
+	if(*f_pos >= scull_dev->size) {
+		goto out;
+	}
+
+	if(*f_pos + count > scull_dev->size) {
+		count = scull_dev->size - *f_pos;
+	}
+
+	/* Get the node in the list */
+	node = *f_pos / itemsize;
+
+	/* Get the location in the item */
+	itemloc = *f_pos % itemsize;
+
+	/* Get the qset location */
+	s_pos = itemloc / quantum;
+
+	/* Get the location inside the qset */
+	q_pos = itemloc % quantum;
+
+	dptr = scull_follow(scull_dev, node);
+
+	if(dptr == NULL || !(dptr->data) || !(dptr->data[s_pos])) {
+		goto out; /* Will not retrieve data from holes */
+	}
+
+	if(count > quantum - q_pos) {
+		count = quantum - q_pos;
+	}
+
+	if(copy_to_user(buff, &dptr->data[s_pos], count)) {
+		retval = -EFAULT;
+		goto out;
+	}
+
+	*f_pos += count;
+	retval = count;
+
+	out:
+		up(&scull_dev->sem);
+		return retval;
 }
 
 ssize_t scull_write(
@@ -99,52 +183,205 @@ ssize_t scull_write(
 			loff_t *f_pos
 			)
 {
-	ssize_t retval = -ENOMEM;
 	struct scull_dev *scull_dev = filp->private_data;
-	int i = 0;
+	int quantum = scull_dev->quantum;
+	int qset = scull_dev->qset;
+	struct scull_qset *dptr;
 
-	char tmpbuff[2];
+	int itemsize = quantum * qset; /* Size of each node */
+	ssize_t retval = -ENOMEM;
+	int item, s_pos, q_pos, nodeloc;
 
 	if(down_interruptible(&(scull_dev->sem))) {
 		return -ERESTARTSYS;
 	}
 
+	/* Get the node "item" in the list */
+	item = (long) *f_pos / itemsize;
 
-	if (count > 2) {
-		count = 2;
+	/* Get the location in the item */
+	nodeloc = (long) *f_pos % itemsize;
+
+	/* Get the location in the quantum set*/
+	q_pos = nodeloc % quantum;
+
+	/* Get quantum set in the quantum node */
+	s_pos = nodeloc / quantum;
+
+	dptr = scull_follow(scull_dev, item);
+
+	if(dptr == NULL) {
+		goto out;
 	}
-	if(copy_from_user(tmpbuff, buff, count)) {
+
+	if(!dptr->data) {
+		dptr->data = kmalloc(qset * sizeof(char *), GFP_KERNEL);
+
+		if(!dptr->data) {
+			goto out;
+		}
+		memset(dptr->data, 0, qset * sizeof(char *));
+	}
+
+	if(!dptr->data[s_pos]) {
+		dptr->data[s_pos] = kmalloc(quantum, GFP_KERNEL);
+		if(!dptr->data) {
+			goto out;
+		}
+	}
+
+	/* Write only upto the end of the quantum */
+	if(count > quantum - q_pos) {
+		count = quantum - q_pos;
+	}
+
+	if(copy_from_user(&dptr->data[s_pos] + q_pos, buff, count)) {
 		retval = -EFAULT;
 		goto out;
 	}
 
-	for(i = 0; i<count; i++)
-	{
-		printk(KERN_DEBUG "%c", tmpbuff[i]);
-	}
-
+	*f_pos += count;
 	retval = count;
+
+	if(scull_dev->size < *f_pos) {
+		scull_dev->size = *f_pos;
+	}
 
 	out:
 		up(&(scull_dev->sem));
 		return retval;
 }
 
-loff_t scull_llseek(
-		struct file *filp,
-		loff_t off,
-		int whence
-		)
+loff_t scull_llseek(struct file *filp, loff_t off, int whence)
 {
-	return 0;
+	struct scull_dev *scull_dev = filp->private_data;
+	loff_t newpos;
+
+	switch(whence) {
+		case 0: /* SEEK_SET */
+			newpos = off;
+			break;
+		case 1: /* SEEK_CUR */
+			newpos = filp->f_pos + off;
+			break;
+		case 2: /* SEEK_END */
+			newpos = scull_dev->size + off;
+			break;
+		default: /* Should not happen */
+			return -EINVAL;
+	}
+
+	if(newpos < 0) {
+		return -EINVAL;
+	}
+
+	filp->f_pos = newpos;
+	return newpos;
 }
 
-long scull_ioctl(
-		struct file *filp,
-		unsigned int cmd,
-		unsigned long arg
-		) {
-	return 0;
+long scull_ioctl(struct file *filp,
+					unsigned int cmd, unsigned long arg)
+{
+	int err = 0, tmp;
+	int retval = 0;
+
+	if(_IOC_TYPE(cmd) != SCULL_IOC_MAGIC) {
+		return -ENOTTY;
+	}
+
+	if(_IOC_NR(cmd) > SCULL_IOC_MAXNR) {
+		return -ENOTTY;
+	}
+
+	if(_IOC_DIR(cmd) & _IOC_READ) {
+		err = !access_ok((void __user *)arg, _IOC_SIZE(cmd));
+	} else if(_IOC_DIR(cmd) & _IOC_WRITE) {
+		err = !access_ok((void __user *)arg, _IOC_SIZE(cmd));
+	}
+
+	if(err) {
+		return -EFAULT;
+	}
+
+	switch(cmd) {
+		case SCULL_IOCRESET:
+			scull_quantum = SCULL_QUANTUM;
+			scull_qset = SCULL_QSET;
+			break;
+		case SCULL_IOCSQUANTUM: /* Set: arg is pointer to the value */
+			if(!capable(CAP_SYS_ADMIN)) {
+				return -EPERM;
+			}
+			retval = get_user(scull_quantum, (int __user *) arg);
+			break;
+		case SCULL_IOCSQSET:
+			if(!capable(CAP_SYS_ADMIN)) {
+				return -EPERM;
+			}
+			retval = get_user(scull_qset, (int __user *) arg);
+			break;
+		case SCULL_IOCTQUANTUM: /* Tell: arg is the value */
+			if(!capable(CAP_SYS_ADMIN)) {
+				return -EPERM;
+			}
+			scull_quantum = arg;
+			break;
+		case SCULL_IOCTQSET:
+			if(!capable(CAP_SYS_ADMIN)) {
+				return -EPERM;
+			}
+			scull_qset = arg;
+			break;
+		case SCULL_IOCGQUANTUM: /* Get: arg is pointer to result */
+			retval = put_user(scull_quantum, (int __user *)arg);
+			break;
+		case SCULL_IOCGQSET: /* Get: arg is pointer to result */
+			retval = put_user(scull_qset, (int __user *)arg);
+			break;
+		case SCULL_IOCQQUANTUM: /*Query: Return as is. Value is positive */
+			return scull_quantum;
+		case SCULL_IOCQQSET: /* Query: Return as is. Value is positive */
+			return scull_qset;
+		case SCULL_IOCXQUANTUM: /* eXchange. Set the new value, return the old value */
+			if(!capable(CAP_SYS_ADMIN)) {
+				return -EPERM;
+			}
+			tmp = scull_quantum;
+			retval = get_user(scull_quantum, (int __user *)arg);
+			if(retval == 0) {
+				retval = put_user(tmp, (int __user *)arg);
+			}
+			break;
+		case SCULL_IOCXQSET:
+			if(!capable(CAP_SYS_ADMIN)) {
+				return -EPERM;
+			}
+			tmp = scull_qset;
+			retval = get_user(scull_qset, (int __user *) arg);
+			if(retval == 0) {
+				retval = put_user(tmp, (int __user *)arg);
+			}
+			break;
+		case SCULL_IOCHQUANTUM: /*sHift: Tell + Query, Query the old value. Set the value from arg */
+			if(!capable(CAP_SYS_ADMIN)) {
+				return -EPERM;
+			}
+
+			tmp = scull_quantum;
+			scull_quantum = arg;
+			return tmp;
+		case SCULL_IOCHQSET:
+			if(!capable(CAP_SYS_ADMIN)) {
+				return -EPERM;
+			}
+			tmp = scull_qset;
+			scull_qset = arg;
+			return tmp;
+		default:
+			return -ENOTTY;
+	}
+
+	return retval;
 }
 
 struct file_operations scull_fops = {
